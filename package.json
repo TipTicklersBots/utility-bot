@@ -1,9 +1,8 @@
 {
   "name": "utility-bot",
   "version": "1.0.0",
-  "description": "Discord moderation utility bot",
+  "description": "Discord moderation bot",
   "main": "index.js",
-  "type": "module",
   "scripts": {
     "start": "node index.js"
   },
@@ -11,3 +10,4 @@
     "node": ">=18"
   }
 }
+
