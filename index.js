@@ -1,19 +1,21 @@
 "use strict";
 
 /**
- * Utility Bot (discord.js) + Railway-friendly web listener
+ * Utility Bot (discord.js v14) — Railway-ready
  *
- * REQUIRED ENV:
+ * REQUIRED ENV on Railway:
  *   DISCORD_TOKEN=your_bot_token
- *   CLIENT_ID=your_application_id
+ *   CLIENT_ID=your_application_id   (same as "Application ID")
  *
  * OPTIONAL ENV:
+ *   PORT=3000
  *   REGISTER_COMMANDS=true   (default true)
- *   PORT=3000                (Railway sets this)
+ *   CLEAR_GUILD_ID=123...    (optional: clears old guild commands causing duplicates)
  *
- * Notes:
- * - This is a normal Gateway bot (discord.js). You DO NOT need Interactions Endpoint URL set in the Dev Portal.
- * - Railway public URL will work because we run a small HTTP server.
+ * IMPORTANT:
+ * - If you are using THIS discord.js Gateway bot:
+ *   ✅ Leave "Interactions Endpoint URL" BLANK in the Dev Portal.
+ *   ✅ Turn OFF "Requires OAuth2 Code Grant" in the Dev Portal.
  */
 
 const fs = require("fs");
@@ -49,8 +51,7 @@ if (!CLIENT_ID) {
 }
 
 // =======================
-// Simple config storage (logs channel per guild)
-// NOTE: Railway disk can reset on redeploy. This is "best effort" storage.
+// Simple config storage (best effort)
 // =======================
 const CONFIG_PATH = path.join(process.cwd(), "config.json");
 
@@ -133,11 +134,7 @@ const COMMANDS = [
           },
         ],
       },
-      {
-        type: 1,
-        name: "view",
-        description: "View current config",
-      },
+      { type: 1, name: "view", description: "View current config" },
     ],
   },
 
@@ -231,38 +228,39 @@ async function registerCommands() {
 
   const rest = new REST({ version: "10" }).setToken(DISCORD_TOKEN);
 
-  console.log("⏳ Registering global commands...");
+  console.log("⏳ Registering GLOBAL commands...");
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: COMMANDS });
   console.log("✅ Commands registered globally!");
+
+  // OPTIONAL: clear old guild commands that cause duplicates
+  const CLEAR_GUILD_ID = process.env.CLEAR_GUILD_ID || "";
+  if (CLEAR_GUILD_ID) {
+    console.log(`🧹 Clearing old guild commands in ${CLEAR_GUILD_ID}...`);
+    await rest.put(
+      Routes.applicationGuildCommands(CLIENT_ID, CLEAR_GUILD_ID),
+      { body: [] }
+    );
+    console.log("✅ Cleared guild commands.");
+  }
 }
 
 // =======================
 // Discord client
 // =======================
-// Key intent: Guilds (required for slash commands)
-// GuildMembers helps moderation/member fetch (recommended)
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers],
   partials: [Partials.Channel],
 });
 
-// =======================
-// Helpers
-// =======================
-function niceEmbed(title, fields = [], extra = {}) {
+function niceEmbed(title, fields = []) {
   return new EmbedBuilder()
     .setColor(0x5865f2)
     .setTitle(title)
     .addFields(fields)
     .setTimestamp(new Date())
-    .setFooter({ text: "Utility Bot" })
-    .setDescription(extra.description || null)
-    .setThumbnail(extra.thumbnail || null);
+    .setFooter({ text: "Utility Bot" });
 }
 
-// =======================
-// Interaction handler
-// =======================
 client.on("interactionCreate", async (interaction) => {
   try {
     if (!interaction.isChatInputCommand()) return;
@@ -293,11 +291,12 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     if (commandName === "serverinfo") {
-      if (!interaction.guild)
+      if (!interaction.guild) {
         return interaction.reply({
           content: "Run this inside a server.",
           ephemeral: true,
         });
+      }
 
       const g = interaction.guild;
       const owner = await g.fetchOwner().catch(() => null);
@@ -322,16 +321,16 @@ client.on("interactionCreate", async (interaction) => {
       ]);
 
       if (g.iconURL()) e.setThumbnail(g.iconURL({ size: 256 }));
-
       return interaction.reply({ embeds: [e] });
     }
 
     if (commandName === "setup") {
-      if (!interaction.guild)
+      if (!interaction.guild) {
         return interaction.reply({
           content: "Run this inside a server.",
           ephemeral: true,
         });
+      }
 
       const sub = interaction.options.getSubcommand(true);
       const cfg = guildCfg(interaction.guild.id);
@@ -359,6 +358,7 @@ client.on("interactionCreate", async (interaction) => {
           ephemeral: true,
           content: `✅ Log channel set to ${channel}`,
         });
+
         await sendLog(
           interaction.guild,
           `🧾 Logging enabled in ${channel} by ${interaction.user}`
@@ -368,21 +368,18 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     if (commandName === "purge") {
-      if (!interaction.guild || !interaction.channel || !interaction.channel.isTextBased())
+      if (!interaction.guild || !interaction.channel || !interaction.channel.isTextBased()) {
         return interaction.reply({
           content: "Run this in a server text channel.",
           ephemeral: true,
         });
+      }
 
       const count = interaction.options.getInteger("count", true);
-
       await interaction.deferReply({ ephemeral: true });
 
-      // Fetch & bulk delete
       const messages = await interaction.channel.messages.fetch({ limit: count });
-      const deleted = await interaction.channel
-        .bulkDelete(messages, true)
-        .catch(() => null);
+      const deleted = await interaction.channel.bulkDelete(messages, true).catch(() => null);
 
       if (!deleted) {
         return interaction.editReply(
@@ -399,11 +396,9 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     if (commandName === "kick") {
-      if (!interaction.guild)
-        return interaction.reply({
-          content: "Run this inside a server.",
-          ephemeral: true,
-        });
+      if (!interaction.guild) {
+        return interaction.reply({ content: "Run this inside a server.", ephemeral: true });
+      }
 
       const user = interaction.options.getUser("user", true);
       const reason = interaction.options.getString("reason") || "No reason provided.";
@@ -413,24 +408,16 @@ client.on("interactionCreate", async (interaction) => {
       const member = await interaction.guild.members.fetch(user.id).catch(() => null);
       if (!member) return interaction.editReply("User not found in this server.");
 
-      await member.kick(reason).catch((e) => {
-        throw new Error(`Kick failed: ${e.message}`);
-      });
-
+      await member.kick(reason);
       await interaction.editReply(`👢 Kicked ${user}.`);
-      await sendLog(
-        interaction.guild,
-        `👢 Kicked ${user} • By: ${interaction.user} • Reason: ${reason}`
-      );
+      await sendLog(interaction.guild, `👢 Kicked ${user} • By: ${interaction.user} • Reason: ${reason}`);
       return;
     }
 
     if (commandName === "ban") {
-      if (!interaction.guild)
-        return interaction.reply({
-          content: "Run this inside a server.",
-          ephemeral: true,
-        });
+      if (!interaction.guild) {
+        return interaction.reply({ content: "Run this inside a server.", ephemeral: true });
+      }
 
       const user = interaction.options.getUser("user", true);
       const reason = interaction.options.getString("reason") || "No reason provided.";
@@ -438,11 +425,10 @@ client.on("interactionCreate", async (interaction) => {
 
       await interaction.deferReply({ ephemeral: true });
 
-      await interaction.guild.members
-        .ban(user.id, { reason, deleteMessageSeconds: deleteDays * 86400 })
-        .catch((e) => {
-          throw new Error(`Ban failed: ${e.message}`);
-        });
+      await interaction.guild.members.ban(user.id, {
+        reason,
+        deleteMessageSeconds: deleteDays * 86400,
+      });
 
       await interaction.editReply(`🔨 Banned ${user}.`);
       await sendLog(
@@ -453,11 +439,9 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     if (commandName === "timeout" || commandName === "untimeout") {
-      if (!interaction.guild)
-        return interaction.reply({
-          content: "Run this inside a server.",
-          ephemeral: true,
-        });
+      if (!interaction.guild) {
+        return interaction.reply({ content: "Run this inside a server.", ephemeral: true });
+      }
 
       const user = interaction.options.getUser("user", true);
       const reason = interaction.options.getString("reason") || "No reason provided.";
@@ -468,32 +452,20 @@ client.on("interactionCreate", async (interaction) => {
       if (!member) return interaction.editReply("User not found in this server.");
 
       if (commandName === "untimeout") {
-        await member.timeout(null, reason).catch((e) => {
-          throw new Error(`Remove timeout failed: ${e.message}`);
-        });
-
+        await member.timeout(null, reason);
         await interaction.editReply(`✅ Timeout removed for ${user}.`);
-        await sendLog(
-          interaction.guild,
-          `✅ Timeout removed: ${user} • By: ${interaction.user} • Reason: ${reason}`
-        );
+        await sendLog(interaction.guild, `✅ Timeout removed: ${user} • By: ${interaction.user} • Reason: ${reason}`);
         return;
       }
 
-      // timeout
       const duration = interaction.options.getString("duration", true);
       const ms = parseDurationMs(duration);
 
       if (!ms || ms < 5000 || ms > 28 * 24 * 60 * 60 * 1000) {
-        return interaction.editReply(
-          'Invalid duration. Use like "10m", "1h", "1d". Max 28d.'
-        );
+        return interaction.editReply('Invalid duration. Use like "10m", "1h", "1d". Max 28d.');
       }
 
-      await member.timeout(ms, reason).catch((e) => {
-        throw new Error(`Timeout failed: ${e.message}`);
-      });
-
+      await member.timeout(ms, reason);
       await interaction.editReply(`⏳ Timed out ${user} for **${duration}**.`);
       await sendLog(
         interaction.guild,
@@ -502,36 +474,21 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    // Fallback
-    return interaction.reply({
-      content: "Unknown command.",
-      ephemeral: true,
-    });
+    return interaction.reply({ content: "Unknown command.", ephemeral: true });
   } catch (err) {
     console.error("❌ interaction error:", err);
 
-    // Always try to respond so Discord doesn't say "did not respond"
+    const msg = `⚠️ Error: ${String(err.message || err).slice(0, 1800)}`;
     if (interaction.deferred || interaction.replied) {
-      return interaction.editReply(
-        `⚠️ Error: ${String(err.message || err).slice(0, 1800)}`
-      ).catch(() => {});
+      return interaction.editReply(msg).catch(() => {});
     }
-    return interaction
-      .reply({
-        ephemeral: true,
-        content: `⚠️ Error: ${String(err.message || err).slice(0, 1800)}`,
-      })
-      .catch(() => {});
+    return interaction.reply({ ephemeral: true, content: msg }).catch(() => {});
   }
 });
 
-// =======================
-// Login + register commands
-// =======================
+// Login + command registration
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-
-  // Register global commands (works in any server, may take a bit to show)
   try {
     await registerCommands();
   } catch (e) {
@@ -544,9 +501,7 @@ client.login(DISCORD_TOKEN).catch((e) => {
   process.exit(1);
 });
 
-// =======================
-// Railway web listener (fixes "Application failed to respond" on your domain)
-// =======================
+// Railway web listener (so your Railway domain responds)
 http
   .createServer((req, res) => {
     if (req.method === "GET" && req.url === "/") {
@@ -560,8 +515,5 @@ http
     console.log(`🌐 Web listener on port ${PORT}`);
   });
 
-// Crash safety
-process.on("unhandledRejection", (e) =>
-  console.error("❌ unhandledRejection:", e)
-);
+process.on("unhandledRejection", (e) => console.error("❌ unhandledRejection:", e));
 process.on("uncaughtException", (e) => console.error("❌ uncaughtException:", e));
