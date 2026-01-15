@@ -51,7 +51,7 @@ if (!CLIENT_ID) {
 }
 
 // =======================
-// Simple config storage
+// Simple config storage (best effort)
 // =======================
 const CONFIG_PATH = path.join(process.cwd(), "config.json");
 
@@ -114,6 +114,7 @@ const COMMANDS = [
   { name: "ping", description: "Check if the bot is online" },
   { name: "help", description: "Show bot help" },
   { name: "serverinfo", description: "Show server info" },
+
   {
     name: "setup",
     description: "Configure the bot for this server",
@@ -136,6 +137,7 @@ const COMMANDS = [
       { type: 1, name: "view", description: "View current config" },
     ],
   },
+
   {
     name: "purge",
     description: "Delete the last N messages (max 100, under 14 days old)",
@@ -152,6 +154,7 @@ const COMMANDS = [
       },
     ],
   },
+
   {
     name: "kick",
     description: "Kick a member",
@@ -258,42 +261,220 @@ function niceEmbed(title, fields = []) {
     .setFooter({ text: "Utility Bot" });
 }
 
-// =======================
-// Express Interactions Endpoint
-// =======================
-const express = require("express");
-const app = express();
-app.use(express.json());
-
-app.post("/api/interactions", (req, res) => {
-  const interaction = req.body;
-
-  // Discord PING request verification
-  if (interaction.type === 1) return res.json({ type: 1 });
-
-  // Example response for slash command
-  if (interaction.type === 2)
-    return res.json({
-      type: 4,
-      data: { content: "✅ Utility Bot is online and ready!" },
-    });
-
-  res.status(400).send("Unknown interaction type");
-});
-
-app.listen(PORT, () => console.log(`🌐 Interactions endpoint running on port ${PORT}`));
-
-// =======================
-// Original interaction handling
-// =======================
 client.on("interactionCreate", async (interaction) => {
   try {
     if (!interaction.isChatInputCommand()) return;
 
     const { commandName } = interaction;
 
-    // ... (existing command handling from your file remains unchanged) ...
-    // You can copy your full interactionCreate code here (all the commands)
+    if (commandName === "ping") {
+      return interaction.reply({ content: "🏓 Pong!", ephemeral: true });
+    }
+
+    if (commandName === "help") {
+      return interaction.reply({
+        ephemeral: true,
+        content: [
+          "**Utility Bot Commands**",
+          "",
+          "• `/ping`",
+          "• `/serverinfo`",
+          "• `/setup view`",
+          "• `/setup logs channel:#channel`",
+          "• `/purge count:1-100`",
+          "• `/kick user:`",
+          "• `/ban user: delete_days: reason:`",
+          "• `/timeout user: duration: reason:`",
+          "• `/untimeout user: reason:`",
+        ].join("\n"),
+      });
+    }
+
+    if (commandName === "serverinfo") {
+      if (!interaction.guild) {
+        return interaction.reply({
+          content: "Run this inside a server.",
+          ephemeral: true,
+        });
+      }
+
+      const g = interaction.guild;
+      const owner = await g.fetchOwner().catch(() => null);
+
+      const boosts = g.premiumSubscriptionCount ?? 0;
+      const tier = g.premiumTier ?? 0;
+
+      const e = niceEmbed(`📌 Server Info — ${g.name}`, [
+        {
+          name: "Owner",
+          value: owner ? `${owner.user} (\`${owner.id}\`)` : "Unknown",
+          inline: false,
+        },
+        {
+          name: "Created",
+          value: `<t:${Math.floor(g.createdTimestamp / 1000)}:F>`,
+          inline: true,
+        },
+        { name: "Members", value: `${g.memberCount}`, inline: true },
+        { name: "Boosts", value: `${boosts} (Tier ${tier})`, inline: true },
+        { name: "Server ID", value: `\`${g.id}\``, inline: false },
+      ]);
+
+      if (g.iconURL()) e.setThumbnail(g.iconURL({ size: 256 }));
+      return interaction.reply({ embeds: [e] });
+    }
+
+    if (commandName === "setup") {
+      if (!interaction.guild) {
+        return interaction.reply({
+          content: "Run this inside a server.",
+          ephemeral: true,
+        });
+      }
+
+      const sub = interaction.options.getSubcommand(true);
+      const cfg = guildCfg(interaction.guild.id);
+
+      if (sub === "view") {
+        return interaction.reply({
+          ephemeral: true,
+          content: [
+            "**⚙️ Current Setup**",
+            `Log channel: ${
+              cfg.log_channel_id ? `<#${cfg.log_channel_id}>` : "Not set"
+            }`,
+            "",
+            "Use `/setup logs channel:#your-channel` to set logs.",
+          ].join("\n"),
+        });
+      }
+
+      if (sub === "logs") {
+        const channel = interaction.options.getChannel("channel", true);
+        cfg.log_channel_id = channel.id;
+        saveConfig(config);
+
+        await interaction.reply({
+          ephemeral: true,
+          content: `✅ Log channel set to ${channel}`,
+        });
+
+        await sendLog(
+          interaction.guild,
+          `🧾 Logging enabled in ${channel} by ${interaction.user}`
+        );
+        return;
+      }
+    }
+
+    if (commandName === "purge") {
+      if (!interaction.guild || !interaction.channel || !interaction.channel.isTextBased()) {
+        return interaction.reply({
+          content: "Run this in a server text channel.",
+          ephemeral: true,
+        });
+      }
+
+      const count = interaction.options.getInteger("count", true);
+      await interaction.deferReply({ ephemeral: true });
+
+      const messages = await interaction.channel.messages.fetch({ limit: count });
+      const deleted = await interaction.channel.bulkDelete(messages, true).catch(() => null);
+
+      if (!deleted) {
+        return interaction.editReply(
+          "⚠️ Could not bulk delete. Messages may be older than 14 days, or I lack permission."
+        );
+      }
+
+      await interaction.editReply(`🧹 Deleted **${deleted.size}** message(s).`);
+      await sendLog(
+        interaction.guild,
+        `🧹 Purge: ${deleted.size} in ${interaction.channel} by ${interaction.user}`
+      );
+      return;
+    }
+
+    if (commandName === "kick") {
+      if (!interaction.guild) {
+        return interaction.reply({ content: "Run this inside a server.", ephemeral: true });
+      }
+
+      const user = interaction.options.getUser("user", true);
+      const reason = interaction.options.getString("reason") || "No reason provided.";
+
+      await interaction.deferReply({ ephemeral: true });
+
+      const member = await interaction.guild.members.fetch(user.id).catch(() => null);
+      if (!member) return interaction.editReply("User not found in this server.");
+
+      await member.kick(reason);
+      await interaction.editReply(`👢 Kicked ${user}.`);
+      await sendLog(interaction.guild, `👢 Kicked ${user} • By: ${interaction.user} • Reason: ${reason}`);
+      return;
+    }
+
+    if (commandName === "ban") {
+      if (!interaction.guild) {
+        return interaction.reply({ content: "Run this inside a server.", ephemeral: true });
+      }
+
+      const user = interaction.options.getUser("user", true);
+      const reason = interaction.options.getString("reason") || "No reason provided.";
+      const deleteDays = interaction.options.getInteger("delete_days") ?? 0;
+
+      await interaction.deferReply({ ephemeral: true });
+
+      await interaction.guild.members.ban(user.id, {
+        reason,
+        deleteMessageSeconds: deleteDays * 86400,
+      });
+
+      await interaction.editReply(`🔨 Banned ${user}.`);
+      await sendLog(
+        interaction.guild,
+        `🔨 Banned ${user} • Deleted days: ${deleteDays} • By: ${interaction.user} • Reason: ${reason}`
+      );
+      return;
+    }
+
+    if (commandName === "timeout" || commandName === "untimeout") {
+      if (!interaction.guild) {
+        return interaction.reply({ content: "Run this inside a server.", ephemeral: true });
+      }
+
+      const user = interaction.options.getUser("user", true);
+      const reason = interaction.options.getString("reason") || "No reason provided.";
+
+      await interaction.deferReply({ ephemeral: true });
+
+      const member = await interaction.guild.members.fetch(user.id).catch(() => null);
+      if (!member) return interaction.editReply("User not found in this server.");
+
+      if (commandName === "untimeout") {
+        await member.timeout(null, reason);
+        await interaction.editReply(`✅ Timeout removed for ${user}.`);
+        await sendLog(interaction.guild, `✅ Timeout removed: ${user} • By: ${interaction.user} • Reason: ${reason}`);
+        return;
+      }
+
+      const duration = interaction.options.getString("duration", true);
+      const ms = parseDurationMs(duration);
+
+      if (!ms || ms < 5000 || ms > 28 * 24 * 60 * 60 * 1000) {
+        return interaction.editReply('Invalid duration. Use like "10m", "1h", "1d". Max 28d.');
+      }
+
+      await member.timeout(ms, reason);
+      await interaction.editReply(`⏳ Timed out ${user} for **${duration}**.`);
+      await sendLog(
+        interaction.guild,
+        `⏳ Timed out: ${user} • For: ${duration} • By: ${interaction.user} • Reason: ${reason}`
+      );
+      return;
+    }
+
+    return interaction.reply({ content: "Unknown command.", ephemeral: true });
   } catch (err) {
     console.error("❌ interaction error:", err);
 
@@ -305,9 +486,7 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
-// =======================
-// Login + register commands
-// =======================
+// Login + command registration
 client.once("ready", async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   try {
@@ -322,9 +501,7 @@ client.login(DISCORD_TOKEN).catch((e) => {
   process.exit(1);
 });
 
-// =======================
-// Optional Railway web listener for "/"
-// =======================
+// Railway web listener (so your Railway domain responds)
 http
   .createServer((req, res) => {
     if (req.method === "GET" && req.url === "/") {
@@ -334,9 +511,9 @@ http
     res.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
     res.end("Not found");
   })
-  .listen(PORT, "0.0.0.0", () =>
-    console.log(`🌐 Web listener (/) on port ${PORT}`)
-  );
+  .listen(PORT, "0.0.0.0", () => {
+    console.log(`🌐 Web listener on port ${PORT}`);
+  });
 
 process.on("unhandledRejection", (e) => console.error("❌ unhandledRejection:", e));
 process.on("uncaughtException", (e) => console.error("❌ uncaughtException:", e));
